@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -11,7 +11,9 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use wasm_bindgen::{prelude::*, JsCast};
-use web_sys::{console, window, Blob, MessageEvent, Url, Worker, WorkerOptions, WorkerType};
+use web_sys::{
+    window, Blob, BlobPropertyBag, MessageEvent, Url, Worker, WorkerOptions, WorkerType,
+};
 
 pub type Callback = dyn FnMut(MessageEvent);
 pub const WORKER_JS: &str = r#"
@@ -66,7 +68,7 @@ impl WrappedWorker {
         blob_options.set_type("application/javascript");
 
         let origin = window()
-            .ok_or_else(|| "window missing".into())?
+            .ok_or_else(|| JsValue::from("window missing"))?
             .location()
             .origin()?
             .to_string();
@@ -131,13 +133,12 @@ impl WrappedWorker {
         self.open_tasks.write().insert(id, sender);
 
         self.worker
-            .post_message(&serde_wasm_bindgen::to_value(&request).unwrap())
-            .expect("Failed to post message");
+            .post_message(&serde_wasm_bindgen::to_value(&request).map_err(JsValue::from)?)?;
 
         // Handle result.
         match receiver.await {
             Ok(result) => Ok(result),
-            Err(_) => todo!(),
+            Err(e) => Err(JsValue::from(e.to_string())),
         }
     }
 }
