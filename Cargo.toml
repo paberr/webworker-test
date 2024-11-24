@@ -8,27 +8,39 @@ crate-type = ["cdylib"]
 
 [dependencies]
 nimiq-bls = { git = "https://github.com/nimiq/core-rs-albatross" }
-nimiq-utils = { git = "https://github.com/nimiq/core-rs-albatross", features = ["key-rng"] }
+nimiq-utils = { git = "https://github.com/nimiq/core-rs-albatross", features = [
+    "key-rng",
+] }
 serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
 serde-wasm-bindgen = "0.4"
 
 ark-serialize = "0.4"
+
+tokio = { version = "1.4", features = ["sync"] }
+parking_lot = "0.12"
 
 getrandom = { version = "0.2", features = ["js"] }
 
 console_error_panic_hook = { version = "0.1.6", optional = true }
 wasm-bindgen = "0.2"
 
+js-sys = { version = "0.3" }
+
 [dependencies.web-sys]
 features = [
-  'console',
-  'Document',
-  'HtmlElement',
-  'HtmlInputElement',
-  'MessageEvent',
-  'Window',
-  'Worker',
-  'WorkerOptions',
-  'WorkerType'
+    "console",
+    "Document",
+    "HtmlElement",
+    "HtmlInputElement",
+    "MessageEvent",
+    "Window",
+    "Location",
+    "Worker",
+    "WorkerOptions",
+    "WorkerType",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
 ]
 version = "0.3.72"

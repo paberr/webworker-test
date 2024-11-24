@@ -12,6 +12,8 @@ use web_sys::{
 use nimiq_bls::{CompressedPublicKey, PublicKey, SecretKey};
 use nimiq_utils::key_rng::SecureGenerate;
 
+mod webworker;
+
 fn setup_validators(num: usize) -> CompressedKeys {
     console::log_1(&"Create validator keys".into());
 
