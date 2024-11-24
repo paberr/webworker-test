@@ -1,10 +1,12 @@
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::de;
 use serde::{de::Visitor, Deserialize, Serialize};
 use std::io::Cursor;
 use std::rc::Rc;
 use std::{cell::RefCell, fmt};
 use wasm_bindgen::prelude::*;
+pub use wasm_bindgen_rayon::init_thread_pool;
 use web_sys::{
     console, HtmlElement, HtmlInputElement, MessageEvent, Worker, WorkerOptions, WorkerType,
 };
@@ -173,7 +175,13 @@ fn setup_input_oninput_callback(worker: Rc<RefCell<web_sys::Worker>>) {
             worker_handle.set_onmessage(Some(persistent_callback_handle.as_ref().unchecked_ref()));
         } else {
             console::log_1(&"uncompress locally".into());
-            let keys = UncompressedKeys::from(keys);
+            // let keys = UncompressedKeys::from(keys);
+            let keys = UncompressedKeys(
+                keys.0
+                    .into_par_iter()
+                    .map(|key| UncompressedPublicKey(key.uncompress().unwrap()))
+                    .collect(),
+            );
             console::log_1(&format!("uncompressed {} keys", keys.0.len()).into());
         }
     });
