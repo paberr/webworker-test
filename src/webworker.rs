@@ -18,7 +18,8 @@ use web_sys::{
 };
 
 use crate::{
-    error::{Error, TryRunError},
+    convert::{from_bytes, to_bytes},
+    error::Full,
     func::WebWorkerFn,
 };
 
@@ -53,11 +54,11 @@ console.debug('Initializing worker');
 "#;
 
 #[derive(Serialize, Deserialize)]
-struct Request<'a> {
+struct Request {
     id: usize,
     func_name: &'static str,
     #[serde(with = "serde_bytes")]
-    arg: &'a [u8],
+    arg: Box<[u8]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,7 +145,48 @@ impl WebWorker {
         })
     }
 
-    pub async fn run<T, R>(&self, func: WebWorkerFn<T, R>, arg: &[u8]) -> Result<Vec<u8>, Error> {
+    #[cfg(feature = "serde")]
+    pub async fn run<T, R>(&self, func: WebWorkerFn<T, R>, arg: &T) -> R
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+        R: Serialize + for<'de> Deserialize<'de>,
+    {
+        // Acquire permit if necessary.
+        let _permit = if let Some(ref s) = self.task_limit {
+            Some(s.acquire().await.unwrap())
+        } else {
+            None
+        };
+
+        // Convert arg and result.
+        self.force_run(func.name, arg).await
+    }
+
+    #[cfg(feature = "serde")]
+    pub async fn try_run<T, R>(&self, func: WebWorkerFn<T, R>, arg: &T) -> Result<R, Full>
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+        R: Serialize + for<'de> Deserialize<'de>,
+    {
+        // Try-acquire permit if necessary.
+        let _permit = if let Some(ref s) = self.task_limit {
+            Some(match s.try_acquire() {
+                Ok(permit) => permit,
+                Err(_) => return Err(Full),
+            })
+        } else {
+            None
+        };
+
+        // Convert arg and result.
+        Ok(self.force_run(func.name, arg).await)
+    }
+
+    pub async fn run_bytes(
+        &self,
+        func: WebWorkerFn<Box<[u8]>, Box<[u8]>>,
+        arg: &Box<[u8]>,
+    ) -> Box<[u8]> {
         // Acquire permit if necessary.
         let _permit = if let Some(ref s) = self.task_limit {
             Some(s.acquire().await.unwrap())
@@ -155,27 +197,35 @@ impl WebWorker {
         self.force_run(func.name, arg).await
     }
 
-    pub async fn try_run<T, R>(
+    pub async fn try_run_bytes(
         &self,
-        func: WebWorkerFn<T, R>,
-        arg: &[u8],
-    ) -> Result<Vec<u8>, TryRunError> {
+        func: WebWorkerFn<Box<[u8]>, Box<[u8]>>,
+        arg: &Box<[u8]>,
+    ) -> Result<Box<u8>, Full> {
         // Try-acquire permit if necessary.
         let _permit = if let Some(ref s) = self.task_limit {
             Some(match s.try_acquire() {
                 Ok(permit) => permit,
-                Err(_) => return Err(TryRunError::Full),
+                Err(_) => return Err(Full),
             })
         } else {
             None
         };
 
-        Ok(self.force_run(func.name, arg).await?)
+        Ok(self.force_run(func.name, arg).await)
     }
 
-    async fn force_run(&self, func_name: &'static str, arg: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn force_run<T, R>(&self, func_name: &'static str, arg: &T) -> R
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+        R: Serialize + for<'de> Deserialize<'de>,
+    {
         let id = self.current_task.fetch_add(1, Ordering::AcqRel);
-        let request = Request { id, func_name, arg };
+        let request = Request {
+            id,
+            func_name,
+            arg: to_bytes(arg),
+        };
 
         // Create channel and add task.
         let (sender, receiver) = oneshot::channel();
@@ -185,18 +235,14 @@ impl WebWorker {
             .post_message(
                 &serde_wasm_bindgen::to_value(&request).expect_throw("Could not serialize request"),
             )
-            .map_err(|_| Error::WorkerLost)?;
+            .expect_throw("WebWorker gone");
 
         // Handle result.
-        match receiver.await {
-            // Success case:
-            Ok(Response {
-                response: Some(result),
-                ..
-            }) => Ok(result),
-            // Function not found:
-            Ok(Response { response: None, .. }) => Err(Error::FnNotFound(func_name)),
-            Err(_) => Err(Error::WorkerLost),
-        }
+        let res = receiver
+            .await
+            .expect_throw("WebWorker gone")
+            .response
+            .expect_throw("Could not find function");
+        from_bytes(&res)
     }
 }

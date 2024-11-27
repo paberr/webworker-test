@@ -1,4 +1,5 @@
 use send_wrapper::SendWrapper;
+use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use wasm_bindgen::{prelude::wasm_bindgen, JsCast, UnwrapThrowExt};
 use web_sys::{console, HtmlElement, HtmlInputElement};
@@ -6,9 +7,18 @@ use webworker::{webworker, WebWorker};
 use webworker_proc_macro::webworker_fn;
 
 #[webworker_fn]
-pub fn sort(mut compressed: Box<[u8]>) -> Box<[u8]> {
-    compressed.sort();
-    compressed
+pub fn sort(mut v: Box<[u8]>) -> Box<[u8]> {
+    v.sort();
+    v
+}
+
+#[derive(Serialize, Deserialize)]
+struct VecType(Vec<u8>);
+
+#[webworker_fn]
+pub fn sort_vec(mut v: VecType) -> VecType {
+    v.0.sort();
+    v
 }
 
 async fn worker() -> &'static WebWorker {
@@ -47,10 +57,13 @@ pub async fn run() {
     // Access worker behind shared handle, following the interior
     // mutability pattern.
     console::log_1(&"postMessage to worker".into());
+    // let res = worker
+    //     .run_bytes(webworker!(sort), &values.clone().into())
+    //     .await;
+
     let res = worker
-        .run(webworker!(sort), &values)
-        .await
-        .expect_throw("Invalid result");
+        .run(webworker!(sort_vec), &VecType(values.clone()))
+        .await;
 
     let result_field = document
         .get_element_by_id("result")
@@ -58,5 +71,5 @@ pub async fn run() {
     let result_field = result_field
         .dyn_ref::<HtmlElement>()
         .expect("#result should be a HtmlInputElement");
-    result_field.set_inner_text(&format!("{:?} -> {:?}", values, res));
+    result_field.set_inner_text(&format!("{:?} -> {:?}", values, res.0));
 }
