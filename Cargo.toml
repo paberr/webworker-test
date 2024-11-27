@@ -1,38 +1,39 @@
+[workspace]
+members = [".", "proc-macro", "demo"]
+
+[workspace.package]
+description = "Dispatching tasks to a WebWorker without `SharedArrayBuffers`."
+authors = ["Pascal Berrang <rust@paberr.net>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/paberr/webworker"
+repository = "https://github.com/paberr/webworker"
+readme = "README.md"
+keywords = ["webworker", "parallelism", "wasm"]
+
 [package]
 name = "webworker"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-crate-type = ["cdylib"]
+description.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
 
 [dependencies]
-nimiq-bls = { git = "https://github.com/nimiq/core-rs-albatross" }
-nimiq-utils = { git = "https://github.com/nimiq/core-rs-albatross", features = [
-    "key-rng",
-] }
+js-sys = { version = "0.3" }
+parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
 serde-wasm-bindgen = "0.4"
-
-ark-serialize = "0.4"
-
+thiserror = "2.0"
 tokio = { version = "1.4", features = ["sync"] }
-parking_lot = "0.12"
-
-getrandom = { version = "0.2", features = ["js"] }
-
-console_error_panic_hook = { version = "0.1.6", optional = true }
-wasm-bindgen = "0.2"
-
-js-sys = { version = "0.3" }
 
 [dependencies.web-sys]
 features = [
-    "console",
-    "Document",
-    "HtmlElement",
-    "HtmlInputElement",
     "MessageEvent",
     "Window",
     "Location",

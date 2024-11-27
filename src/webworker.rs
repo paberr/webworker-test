@@ -6,13 +6,20 @@ use std::{
     },
 };
 
-use js_sys::Array;
+use js_sys::{
+    wasm_bindgen::{prelude::Closure, JsCast, JsValue, UnwrapThrowExt},
+    Array,
+};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
-use wasm_bindgen::{prelude::*, JsCast};
+use tokio::sync::{oneshot, Semaphore};
 use web_sys::{
     window, Blob, BlobPropertyBag, MessageEvent, Url, Worker, WorkerOptions, WorkerType,
+};
+
+use crate::{
+    error::{Error, TryRunError},
+    func::WebWorkerFn,
 };
 
 pub type Callback = dyn FnMut(MessageEvent);
@@ -22,47 +29,52 @@ console.debug('Initializing worker');
 
 (async () => {
     await init();
+    self.postMessage('post-init');
 
-    self.onmessage = async event => {
-        console.trace('Received worker event');
+    self.addEventListener('message', async event => {
+        console.debug('Received worker event');
         const { id, func_name, arg } = event.data;
 
         const fn = funcs[func_name];
-        if (!fn) return console.error(`Couldn't find function '${func_name}', make sure it is exported.`);
+        if (!fn) {
+            console.error(`Function '${func_name}' is not exported.`);
+            self.postMessage({ id: id, response: null });
+            return;
+        }
 
         const worker_result = await fn(arg);
 
         // Send response back to be handled by callback in main thread.
-        console.log('Send worker result');
-        self.postMessage({ id: id, result: worker_result });
+        console.debug('Send worker result');
+        self.postMessage({ id: id, response: worker_result });
     });
 })();
 "#;
 
 #[derive(Serialize, Deserialize)]
-struct Request {
+struct Request<'a> {
     id: usize,
-    func_name: String,
+    func_name: &'static str,
     #[serde(with = "serde_bytes")]
-    arg: Vec<u8>,
+    arg: &'a [u8],
 }
 
 #[derive(Serialize, Deserialize)]
 struct Response {
     id: usize,
     #[serde(with = "serde_bytes")]
-    response: Vec<u8>,
+    response: Option<Vec<u8>>,
 }
 
-pub struct WrappedWorker {
+pub struct WebWorker {
     worker: Worker,
-    task_limit: Option<usize>,
+    task_limit: Option<Semaphore>,
     current_task: AtomicUsize,
-    open_tasks: Arc<RwLock<HashMap<usize, oneshot::Sender<Vec<u8>>>>>,
-    callback: Closure<Callback>,
+    open_tasks: Arc<RwLock<HashMap<usize, oneshot::Sender<Response>>>>,
+    _callback: Closure<Callback>,
 }
 
-impl WrappedWorker {
+impl WebWorker {
     fn worker_blob(wasm_path: &str) -> Result<String, JsValue> {
         let blob_options = BlobPropertyBag::new();
         blob_options.set_type("application/javascript");
@@ -85,60 +97,105 @@ impl WrappedWorker {
     }
 
     /// Create a new WrappedWorker
-    pub(crate) fn new(main_js: &str, task_limit: Option<usize>) -> Result<WrappedWorker, JsValue> {
+    pub async fn new(main_js: &str, task_limit: Option<usize>) -> Result<WebWorker, JsValue> {
         // Create worker
         let worker_options = WorkerOptions::new();
         worker_options.set_type(WorkerType::Module);
-        let worker =
-            Worker::new_with_options(&WrappedWorker::worker_blob(main_js)?, &worker_options)?;
+        let worker = Worker::new_with_options(&WebWorker::worker_blob(main_js)?, &worker_options)?;
+
+        // Wait until worker is initialized.
+        let (tx, rx) = oneshot::channel();
+        let handler = Closure::once(move |_: MessageEvent| {
+            let _ = tx.send(());
+        });
+        worker.set_onmessage(Some(handler.as_ref().unchecked_ref()));
+        rx.await.expect_throw("Webworker init sender dropped");
 
         let tasks = Arc::new(RwLock::new(HashMap::new()));
 
         let callback_handle = Self::callback(Arc::clone(&tasks));
         worker.set_onmessage(Some(callback_handle.as_ref().unchecked_ref()));
 
-        Ok(WrappedWorker {
+        Ok(WebWorker {
             worker,
-            task_limit,
+            task_limit: task_limit.map(|limit| Semaphore::new(limit)),
             current_task: AtomicUsize::new(0),
             open_tasks: tasks,
-            callback: callback_handle,
+            _callback: callback_handle,
         })
     }
 
-    /// Callback
+    /// Function to be called when a result is ready.
     fn callback(
-        tasks: Arc<RwLock<HashMap<usize, oneshot::Sender<Vec<u8>>>>>,
+        tasks: Arc<RwLock<HashMap<usize, oneshot::Sender<Response>>>>,
     ) -> Closure<dyn FnMut(MessageEvent)> {
         Closure::new(move |event: MessageEvent| {
             let data = event.data();
             let response: Response =
-                serde_wasm_bindgen::from_value(data).expect("Couldn't deserialize response");
+                serde_wasm_bindgen::from_value(data).expect_throw("Could not deserialize response");
             let mut tasks_wg = tasks.write();
 
             // Send response on channel.
             if let Some(channel) = tasks_wg.remove(&response.id) {
                 // Ignore if receiver is already closed.
-                let _ = channel.send(response.response);
+                let _ = channel.send(response);
             }
         })
     }
 
-    pub async fn run(&self, func_name: String, arg: Vec<u8>) -> Result<Vec<u8>, JsValue> {
+    pub async fn run(&self, func: WebWorkerFn, arg: &[u8]) -> Result<Vec<u8>, Error> {
+        // Acquire permit if necessary.
+        let _permit = if let Some(ref s) = self.task_limit {
+            Some(s.acquire().await.unwrap())
+        } else {
+            None
+        };
+
+        self.force_run(func, arg).await
+    }
+
+    pub async fn try_run(&self, func: WebWorkerFn, arg: &[u8]) -> Result<Vec<u8>, TryRunError> {
+        // Try-acquire permit if necessary.
+        let _permit = if let Some(ref s) = self.task_limit {
+            Some(match s.try_acquire() {
+                Ok(permit) => permit,
+                Err(_) => return Err(TryRunError::Full),
+            })
+        } else {
+            None
+        };
+
+        Ok(self.force_run(func, arg).await?)
+    }
+
+    async fn force_run(&self, func: WebWorkerFn, arg: &[u8]) -> Result<Vec<u8>, Error> {
         let id = self.current_task.fetch_add(1, Ordering::AcqRel);
-        let request = Request { id, func_name, arg };
+        let request = Request {
+            id,
+            func_name: func.name,
+            arg,
+        };
 
         // Create channel and add task.
         let (sender, receiver) = oneshot::channel();
         self.open_tasks.write().insert(id, sender);
 
         self.worker
-            .post_message(&serde_wasm_bindgen::to_value(&request).map_err(JsValue::from)?)?;
+            .post_message(
+                &serde_wasm_bindgen::to_value(&request).expect_throw("Could not serialize request"),
+            )
+            .map_err(|_| Error::WorkerLost)?;
 
         // Handle result.
         match receiver.await {
-            Ok(result) => Ok(result),
-            Err(e) => Err(JsValue::from(e.to_string())),
+            // Success case:
+            Ok(Response {
+                response: Some(result),
+                ..
+            }) => Ok(result),
+            // Function not found:
+            Ok(Response { response: None, .. }) => Err(Error::FnNotFound(func.name)),
+            Err(_) => Err(Error::WorkerLost),
         }
     }
 }
