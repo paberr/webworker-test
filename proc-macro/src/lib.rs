@@ -5,7 +5,7 @@
 //! tests.
 
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{parse_macro_input, ItemFn};
 
 /// A procedural macro for the `test` attribute.
@@ -65,19 +65,23 @@ pub fn webworker_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
     let fn_name = &input.sig.ident;
 
-    // Add #[wasm_bindgen] attribute to the function
-    let wasm_bindgen_attr = quote! { #[wasm_bindgen::prelude::wasm_bindgen] };
-
-    // Generate the module with the constant
+    // Generate a module with the wrapper function
+    let wrapper_fn_name = format_ident!("__webworker_{}", fn_name);
     let mod_code = quote! {
         pub mod #fn_name {
             pub const __WEBWORKER: () = ();
+            const _: () = {
+                #[wasm_bindgen::prelude::wasm_bindgen]
+                pub fn #wrapper_fn_name(arg: Box<[u8]>) -> Box<[u8]> {
+                    // Only (de)serialize if arg is not Box<[u8]>
+                    super::#fn_name(arg)
+                }
+            };
         }
     };
 
     // Combine everything into the final output
     let expanded = quote! {
-        #wasm_bindgen_attr
         #input
 
         #mod_code

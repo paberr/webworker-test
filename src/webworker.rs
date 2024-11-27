@@ -35,7 +35,8 @@ console.debug('Initializing worker');
         console.debug('Received worker event');
         const { id, func_name, arg } = event.data;
 
-        const fn = funcs[func_name];
+        const webworker_func_name = `__webworker_${func_name}`;
+        const fn = funcs[webworker_func_name];
         if (!fn) {
             console.error(`Function '${func_name}' is not exported.`);
             self.postMessage({ id: id, response: null });
@@ -143,7 +144,7 @@ impl WebWorker {
         })
     }
 
-    pub async fn run(&self, func: WebWorkerFn, arg: &[u8]) -> Result<Vec<u8>, Error> {
+    pub async fn run<T, R>(&self, func: WebWorkerFn<T, R>, arg: &[u8]) -> Result<Vec<u8>, Error> {
         // Acquire permit if necessary.
         let _permit = if let Some(ref s) = self.task_limit {
             Some(s.acquire().await.unwrap())
@@ -151,10 +152,14 @@ impl WebWorker {
             None
         };
 
-        self.force_run(func, arg).await
+        self.force_run(func.name, arg).await
     }
 
-    pub async fn try_run(&self, func: WebWorkerFn, arg: &[u8]) -> Result<Vec<u8>, TryRunError> {
+    pub async fn try_run<T, R>(
+        &self,
+        func: WebWorkerFn<T, R>,
+        arg: &[u8],
+    ) -> Result<Vec<u8>, TryRunError> {
         // Try-acquire permit if necessary.
         let _permit = if let Some(ref s) = self.task_limit {
             Some(match s.try_acquire() {
@@ -165,16 +170,12 @@ impl WebWorker {
             None
         };
 
-        Ok(self.force_run(func, arg).await?)
+        Ok(self.force_run(func.name, arg).await?)
     }
 
-    async fn force_run(&self, func: WebWorkerFn, arg: &[u8]) -> Result<Vec<u8>, Error> {
+    async fn force_run(&self, func_name: &'static str, arg: &[u8]) -> Result<Vec<u8>, Error> {
         let id = self.current_task.fetch_add(1, Ordering::AcqRel);
-        let request = Request {
-            id,
-            func_name: func.name,
-            arg,
-        };
+        let request = Request { id, func_name, arg };
 
         // Create channel and add task.
         let (sender, receiver) = oneshot::channel();
@@ -194,7 +195,7 @@ impl WebWorker {
                 ..
             }) => Ok(result),
             // Function not found:
-            Ok(Response { response: None, .. }) => Err(Error::FnNotFound(func.name)),
+            Ok(Response { response: None, .. }) => Err(Error::FnNotFound(func_name)),
             Err(_) => Err(Error::WorkerLost),
         }
     }
