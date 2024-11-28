@@ -1,7 +1,7 @@
 use send_wrapper::SendWrapper;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
-use wasm_bindgen::{prelude::wasm_bindgen, JsCast, UnwrapThrowExt};
+use wasm_bindgen::{prelude::wasm_bindgen, JsCast};
 use web_sys::{console, HtmlElement, HtmlInputElement};
 use webworker::{webworker, WebWorker};
 use webworker_proc_macro::webworker_fn;
@@ -24,13 +24,7 @@ pub fn sort_vec(mut v: VecType) -> VecType {
 async fn worker() -> &'static WebWorker {
     static WORKER: OnceCell<SendWrapper<WebWorker>> = OnceCell::const_new();
     WORKER
-        .get_or_init(move || async {
-            SendWrapper::new(
-                WebWorker::new("/pkg/webworker_demo.js", None)
-                    .await
-                    .unwrap(),
-            )
-        })
+        .get_or_init(move || async { SendWrapper::new(WebWorker::new(None).await.unwrap()) })
         .await
 }
 

@@ -1,21 +1,16 @@
 use std::{
+    cell::{Cell, RefCell},
     collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    rc::Rc,
 };
 
 use js_sys::{
-    wasm_bindgen::{prelude::Closure, JsCast, JsValue, UnwrapThrowExt},
-    Array,
+    wasm_bindgen::{self, prelude::Closure, JsCast, JsValue, UnwrapThrowExt},
+    Array, JsString,
 };
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Semaphore};
-use web_sys::{
-    window, Blob, BlobPropertyBag, MessageEvent, Url, Worker, WorkerOptions, WorkerType,
-};
+use web_sys::{Blob, BlobPropertyBag, MessageEvent, Url, Worker, WorkerOptions, WorkerType};
 
 use crate::{
     convert::{from_bytes, to_bytes},
@@ -68,42 +63,60 @@ struct Response {
     response: Option<Vec<u8>>,
 }
 
+pub fn main_js() -> JsString {
+    #[wasm_bindgen::prelude::wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(thread_local, js_namespace = ["import", "meta"], js_name = url)]
+        static URL: JsString;
+    }
+
+    URL.with(Clone::clone)
+}
+
 pub struct WebWorker {
     worker: Worker,
     task_limit: Option<Semaphore>,
-    current_task: AtomicUsize,
-    open_tasks: Arc<RwLock<HashMap<usize, oneshot::Sender<Response>>>>,
+    current_task: Cell<usize>,
+    open_tasks: Rc<RefCell<HashMap<usize, oneshot::Sender<Response>>>>,
     _callback: Closure<Callback>,
 }
 
 impl WebWorker {
-    fn worker_blob(wasm_path: &str) -> Result<String, JsValue> {
+    fn worker_blob(wasm_path: Option<&str>) -> String {
         let blob_options = BlobPropertyBag::new();
         blob_options.set_type("application/javascript");
 
-        let origin = window()
-            .ok_or_else(|| JsValue::from("window missing"))?
-            .location()
-            .origin()?
-            .to_string();
+        let mut wasm_path_owned = None;
+        let wasm_path = wasm_path.unwrap_or_else(|| {
+            // TODO: Make nicer
+            wasm_path_owned = Some(main_js().as_string().unwrap_throw());
+            &wasm_path_owned.as_ref().unwrap_throw()
+        });
 
         let code = Array::new();
         code.push(&JsValue::from_str(
-            &WORKER_JS.replace("{{wasm}}", &format!("{}{}", origin, wasm_path)),
+            &WORKER_JS.replace("{{wasm}}", wasm_path),
         ));
 
-        Url::create_object_url_with_blob(&Blob::new_with_blob_sequence_and_options(
-            &code.into(),
-            &blob_options,
-        )?)
+        Url::create_object_url_with_blob(
+            &Blob::new_with_blob_sequence_and_options(&code.into(), &blob_options)
+                .expect_throw("Couldn't create blob"),
+        )
+        .expect_throw("Couldn't create object URL")
+    }
+
+    pub async fn new(task_limit: Option<usize>) -> WebWorker {
+        Self::with_path(None, task_limit).await
     }
 
     /// Create a new WrappedWorker
-    pub async fn new(main_js: &str, task_limit: Option<usize>) -> Result<WebWorker, JsValue> {
+    pub async fn with_path(main_js: Option<&str>, task_limit: Option<usize>) -> WebWorker {
         // Create worker
         let worker_options = WorkerOptions::new();
         worker_options.set_type(WorkerType::Module);
-        let worker = Worker::new_with_options(&WebWorker::worker_blob(main_js)?, &worker_options)?;
+        let script_url = WebWorker::worker_blob(main_js);
+        let worker = Worker::new_with_options(&script_url, &worker_options)
+            .expect_throw("Couldn't create worker");
 
         // Wait until worker is initialized.
         let (tx, rx) = oneshot::channel();
@@ -113,29 +126,29 @@ impl WebWorker {
         worker.set_onmessage(Some(handler.as_ref().unchecked_ref()));
         rx.await.expect_throw("Webworker init sender dropped");
 
-        let tasks = Arc::new(RwLock::new(HashMap::new()));
+        let tasks = Rc::new(RefCell::new(HashMap::new()));
 
-        let callback_handle = Self::callback(Arc::clone(&tasks));
+        let callback_handle = Self::callback(Rc::clone(&tasks));
         worker.set_onmessage(Some(callback_handle.as_ref().unchecked_ref()));
 
-        Ok(WebWorker {
+        WebWorker {
             worker,
             task_limit: task_limit.map(|limit| Semaphore::new(limit)),
-            current_task: AtomicUsize::new(0),
+            current_task: Cell::new(0),
             open_tasks: tasks,
             _callback: callback_handle,
-        })
+        }
     }
 
     /// Function to be called when a result is ready.
     fn callback(
-        tasks: Arc<RwLock<HashMap<usize, oneshot::Sender<Response>>>>,
+        tasks: Rc<RefCell<HashMap<usize, oneshot::Sender<Response>>>>,
     ) -> Closure<dyn FnMut(MessageEvent)> {
         Closure::new(move |event: MessageEvent| {
             let data = event.data();
             let response: Response =
                 serde_wasm_bindgen::from_value(data).expect_throw("Could not deserialize response");
-            let mut tasks_wg = tasks.write();
+            let mut tasks_wg = tasks.borrow_mut();
 
             // Send response on channel.
             if let Some(channel) = tasks_wg.remove(&response.id) {
@@ -220,7 +233,8 @@ impl WebWorker {
         T: Serialize + for<'de> Deserialize<'de>,
         R: Serialize + for<'de> Deserialize<'de>,
     {
-        let id = self.current_task.fetch_add(1, Ordering::AcqRel);
+        let id = self.current_task.get();
+        self.current_task.set(id.wrapping_add(1));
         let request = Request {
             id,
             func_name,
@@ -229,7 +243,7 @@ impl WebWorker {
 
         // Create channel and add task.
         let (sender, receiver) = oneshot::channel();
-        self.open_tasks.write().insert(id, sender);
+        self.open_tasks.borrow_mut().insert(id, sender);
 
         self.worker
             .post_message(
@@ -244,5 +258,15 @@ impl WebWorker {
             .response
             .expect_throw("Could not find function");
         from_bytes(&res)
+    }
+
+    /// Return the current capacity for new tasks.
+    pub fn capacity(&self) -> Option<usize> {
+        self.task_limit.as_ref().map(|s| s.available_permits())
+    }
+
+    /// Return the number of tasks currently queued to this worker.
+    pub fn current_load(&self) -> usize {
+        self.open_tasks.borrow().len()
     }
 }

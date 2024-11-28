@@ -24,8 +24,8 @@ readme.workspace = true
 keywords.workspace = true
 
 [dependencies]
+futures = "0.3"
 js-sys = { version = "0.3" }
-parking_lot = "0.12"
 postcard = { version = "1.0", features = ["alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
@@ -44,6 +44,7 @@ features = [
     "Blob",
     "BlobPropertyBag",
     "Url",
+    "Navigator",
 ]
 version = "0.3.72"
 
